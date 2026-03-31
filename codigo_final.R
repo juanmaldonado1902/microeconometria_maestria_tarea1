@@ -1,15 +1,20 @@
-# Tarea Microeconometría - versión simplificada
+# Tarea 1, Econometría II
 # Creada: Juan Pablo Maldonado
+# Revisada y editada: Arturo Aguilar
 
-library(tidyverse)
-library(broom)
-library(lmtest)
-library(sandwich)
-library(car)
-library(fixest)
-library(glmnet)
+# Clean environment and workspace
+rm(list = ls())
 
-# 1) Cargar y limpiar base
+# Librerias
+pkgs <- c("readr", "dplyr", "tibble", "ggplot2", "sandwich", "lmtest",
+          "stargazer","tidyr","car","tidyverse","broom","lmtest",
+          "fixest","glmnet")
+to_install <- pkgs[!pkgs %in% rownames(installed.packages())]
+if (length(to_install) > 0) install.packages(to_install, dependencies = TRUE)
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+
+# Cargar y limpiar base
 df <- read_csv("india_base_final.csv", show_col_types = FALSE) %>%
   mutate(
     across(c(treat, age, total_expenditure, total_expenditure_obs), as.numeric),
@@ -29,7 +34,7 @@ covars <- intersect(c("gender", "age", "religion", "caste", "education", "homeBu
 controls_simple <- intersect(c("age", "birthplace", "gender", "caste"), names(df)) # generadas para el modelo de controles
 controls <- intersect(c("gender", "birthplace", "age", "religion", "caste", "education", "homeBuilt"), names(df)) # variables exclusivas del pretratamiento que dejo para double lasso
 
-# Pregunta 1: Balance
+# ====/// 1a: Tabla de balance \\\=====
 
 balance_table <- map_dfr(covars, \(v) {
   d <- df %>% select(treat, all_of(v)) %>% drop_na()
@@ -46,6 +51,8 @@ balance_table <- map_dfr(covars, \(v) {
 
 balance_table
 
+# ====/// 1c: F-test balance \\\=====
+
 model_balance <- lm(reformulate(covars, response = "treat"), data = df) # modelo para ver si explican treat
 robust_se <- vcovHC(model_balance, type = "HC1")
 coeftest(model_balance, vcov = robust_se)
@@ -54,37 +61,29 @@ coef_names <- setdiff(names(coef(model_balance)), "(Intercept)")
 joint_test <- linearHypothesis(model_balance, paste0(coef_names, " = 0"), vcov = robust_se)
 joint_test
 
-#  Neyman simple
+# ====/// 2b: Neyman y MCO \\\=====
 
-df_exp <- df %>% filter(!is.na(total_expenditure))
-y1 <- df_exp %>% filter(treat == 1) %>% pull(total_expenditure)
-y0 <- df_exp %>% filter(treat == 0) %>% pull(total_expenditure)
+df_agg <- df %>% filter(!is.na(total_expenditure)) %>%
+  group_by(treat) %>%
+  summarise(Mean = mean(total_expenditure),
+            Var = var(total_expenditure),
+            num = n())
 
-tau_hat_neyman <- mean(y1) - mean(y0)
-se_neyman <- sqrt(var(y1) / length(y1) + var(y0) / length(y0))
-mean_control <- mean(y0)
-effect_pct <- 100 * tau_hat_neyman / mean_control
+stargazer(df_agg,summary = F, 
+          title = "Efectos de Tratamiento",
+          out="tabla_ates.tex")
 
-mean(y1); mean(y0); tau_hat_neyman; se_neyman
-summary(lm(total_expenditure ~ treat, data = df_exp))$coefficients 
-mean_control; effect_pct
-
-tabla_neyman <- tibble(
-  n_tratamiento = length(y1),
-  n_control = length(y0),
-  var_tratamiento = round(var(y1), 4),
-  var_control = round(var(y0), 4),
-  tau_hat = round(tau_hat_neyman, 4),
-  var_tau_hat = round(var(y1) / length(y1) + var(y0) / length(y0), 6),
-  se_tau_hat = round(se_neyman, 4),
-  t_stat = round(tau_hat_neyman / se_neyman, 4)
-)
-
-tabla_neyman
+(tau_hat_neyman <- df_agg$Mean[df_agg$treat==1] -
+                    df_agg$Mean[df_agg$treat==0])
+(se_neyman <- sqrt((df_agg$Var[df_agg$treat==1] / df_agg$num[df_agg$treat==1]) + 
+                     (df_agg$Var[df_agg$treat==0] / df_agg$num[df_agg$treat==0])))
+(t <- tau_hat_neyman / se_neyman)
+(p <- 2*(1-pnorm(abs(t))))
 
 # Regresión OLS  Neyman (esta parte no es completamente necesaria porque ya puse el código para extraer los coeficientes)
 
-reg_neyman <- lm(total_expenditure ~ treat, data = df_exp)
+reg_neyman <- lm(total_expenditure ~ treat, 
+                 data = df %>% filter(!is.na(total_expenditure)))
 reg_neyman_rob <- coeftest(reg_neyman, vcov = vcovHC(reg_neyman, type = "HC1"))
 reg_neyman_rob
 
