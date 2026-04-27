@@ -31,7 +31,6 @@ df <- read_csv("india_base_final.csv", show_col_types = FALSE) %>%
 # Definición de variables
 
 covars <- intersect(c("gender", "age", "religion", "caste", "education", "homeBuilt"), names(df)) # generadas para la tabla de balance
-controls_simple <- intersect(c("age", "birthplace", "gender", "caste"), names(df)) # generadas para el modelo de controles
 controls <- intersect(c("gender", "birthplace", "age", "religion", "caste", "education", "homeBuilt"), names(df)) # variables exclusivas del pretratamiento que dejo para double lasso
 
 # ====/// 1a: Tabla de balance \\\=====
@@ -87,11 +86,22 @@ reg_neyman <- lm(total_expenditure ~ treat,
 reg_neyman_rob <- coeftest(reg_neyman, vcov = vcovHC(reg_neyman, type = "HC1"))
 reg_neyman_rob
 
-#  Neyman estratificado
+# ====/// 3a: Neyman estratificado \\\=====
 
-df_strat <- df %>% filter(!is.na(total_expenditure), !is.na(age))
+df_strat <- df %>% filter(!is.na(total_expenditure), !is.na(age)) %>%
+  group_by(estrato,treat) %>%
+  summarise(Mean = mean(total_expenditure),
+            Var = var(total_expenditure),
+            num = n(),
+            .groups = "drop")
 
-tabla_estratos <- df_strat %>%
+stargazer(df_strat,summary = F, 
+          title = "Estadísticas por Estrato",
+          out="tabla_desc_neyman.tex")
+
+
+
+tabla_estratos <- df %>% filter(!is.na(total_expenditure), !is.na(age)) %>%
   group_by(estrato, treat) %>%
   summarise(
     n = n(),
@@ -106,26 +116,31 @@ tabla_estratos <- df_strat %>%
     n_h = n_T + n_C,
     peso = n_h / sum(n_h),
     tau_h = media_T - media_C,
-    var_tau_h = varianza_T / n_T + varianza_C / n_C
-  )
+    var_tau_h = varianza_T / n_T + varianza_C / n_C) %>%
+  select(estrato,tau_h,var_tau_h,n_h,peso)
 
-tabla_estratos
+stargazer(tabla_estratos,summary = F, 
+          title = "Efectos de Tratamiento por Estrato",
+          out="tabla_ates_neyman.tex")
 
-tau_strat <- sum(tabla_estratos$peso * tabla_estratos$tau_h)
+(tau_strat <- sum(tabla_estratos$peso * tabla_estratos$tau_h))
 var_strat <- sum((tabla_estratos$peso^2) * tabla_estratos$var_tau_h)
-se_strat <- sqrt(var_strat)
-t_strat <- tau_strat / se_strat
+(se_strat <- sqrt(var_strat))
+(t_strat <- tau_strat / se_strat)
+(p_strat <- 2*(1-pnorm(abs(t_strat))))
 
-tau_strat; var_strat; se_strat; t_strat
+# ====/// 3b: OLS estratificado \\\=====
 
-mod_inter <- lm(total_expenditure ~ 0 + estrato + estrato:treat, data = df_strat) # modelo sin el intercepto para reconstruir el valor de neyman estratificado
+mod_inter <- lm(total_expenditure ~ 0 + estrato + estrato:treat, data = df) 
 summary(mod_inter)
 
-coef_h <- coef(mod_inter)[grep(":treat", names(coef(mod_inter)))]
-tau_strat_reg <- sum(tabla_estratos$peso * coef_h)
-tau_strat_reg
+
+# ====/// 4a: OLS estratificado \\\=====
 
 # OLS + FE (controles)
+controls_simple <- intersect(c("age", "birthplace", "gender", 
+                               "caste"), names(df)) 
+
 run_feols <- \(y) {
   feols(
     as.formula(paste(y, "~ treat +", paste(controls_simple, collapse = " + "), "| Pole")),
@@ -133,16 +148,23 @@ run_feols <- \(y) {
   )
 }
 
-ols_adult <- run_feols("adult_activity")
-ols_child <- run_feols("child_activity")
+ols_adult <- feols(adult_activity ~ treat + age + birthplace + gender + caste | Pole,
+                   data = df, cluster = ~Pole)
+  
+ols_child <- feols(child_activity ~ treat + age + birthplace + gender + caste | Pole,
+                   data = df, cluster = ~Pole)
 
-etable(ols_adult, ols_child, keep = "treat", se = "cluster")
+etable(ols_adult, ols_child,
+       headers = c("Actividad adultos", "Actividad niños"),
+       tex = TRUE,
+       file = "Tabla_p4a.tex")
 
-# Double LASSO
+# ====/// 4b: Double lasso \\\=====
+
 double_lasso_fe <- function(yname, data = df, xvars = controls, dname = "treat", fe = "Pole") {
   dsub <- data %>% select(all_of(c(yname, dname, fe, xvars))) %>% na.omit()
   fe_id <- dsub[[fe]]
-  demean <- \(v) v - ave(v, fe_id, FUN = mean) # transformación within
+  demean <- \(v) v - ave(v, fe_id, FUN = mean) 
   
   y <- demean(dsub[[yname]])
   d <- demean(as.numeric(dsub[[dname]]))
@@ -174,94 +196,67 @@ dl_child$coeftest
 dl_adult$selected_cols
 dl_child$selected_cols
 
-#  Atrición / Lee Bounds
+
+# ====/// 5a: Atrición  \\\=====
+
 attrition_tbl <- df %>%
   group_by(treat) %>%
   summarise(
     N = n(),
-    tasa_observado = mean(total_expenditure_isobs),
-    tasa_atricion = 1 - tasa_observado,
-    .groups = "drop"
-  )
+    tasa_atricion = 1-mean(total_expenditure_isobs))
 
-attrition_tbl
+stargazer(attrition_tbl,summary = F, 
+          title = "Tasa de Atricion",
+          out="atricion.tex")
+
+# ====/// 5b: Lee Bounds  \\\=====
+
+mean_control <- mean()
 
 df_obs <- df %>% filter(total_expenditure_isobs == 1)
-tau_uncorrected <- with(df_obs, mean(total_expenditure_obs[treat == 1]) - mean(total_expenditure_obs[treat == 0]))
-tau_uncorrected
 
-p1 <- mean(df$total_expenditure_isobs[df$treat == 1])
-p0 <- mean(df$total_expenditure_isobs[df$treat == 0])
+mean_control <- mean(df_obs$total_expenditure[df_obs$treat==0])
+p_ar_treat <- (1-attrition_tbl$tasa_atricion[attrition_tbl$treat==0])/(1-attrition_tbl$tasa_atricion[attrition_tbl$treat==1])
 
-trim_group <- function(x, share, drop = c("top", "bottom")) {
-  drop <- match.arg(drop)
-  x <- sort(x)
-  n_trim <- floor(length(x) * share)
-  if (n_trim <= 0) return(x)
-  if (drop == "top") x[1:(length(x) - n_trim)] else x[(n_trim + 1):length(x)]
-}
-
-treated_y <- df %>% filter(treat == 1, total_expenditure_isobs == 1) %>% pull(total_expenditure_obs)
-control_y <- df %>% filter(treat == 0, total_expenditure_isobs == 1) %>% pull(total_expenditure_obs)
-
-if (abs(p1 - p0) < 1e-12) {
-  lee_lower <- tau_uncorrected
-  lee_upper <- tau_uncorrected
-} else if (p1 > p0) {
-  trim_share <- (p1 - p0) / p1
-  lee_lower <- mean(trim_group(treated_y, trim_share, "top")) - mean(control_y)
-  lee_upper <- mean(trim_group(treated_y, trim_share, "bottom")) - mean(control_y)
-} else {
-  trim_share <- (p0 - p1) / p0
-  lee_lower <- mean(treated_y) - mean(trim_group(control_y, trim_share, "bottom"))
-  lee_upper <- mean(treated_y) - mean(trim_group(control_y, trim_share, "top"))
-}
+df_lee <- df_obs %>% filter(treat==1) %>%
+      arrange(total_expenditure) %>%
+  summarise(lower_lim = mean(head(total_expenditure,floor(p_ar_treat*n()))),
+            upper_lim = mean(tail(total_expenditure,floor(p_ar_treat*n()))))
 
 lee_tbl <- tibble(
-  Estimador = c("Sin corrección (obs)", "Lee - Límite inferior", "Lee - Límite superior"),
-  Valor = round(c(tau_uncorrected, lee_lower, lee_upper), 4)
-)
+  Estimador = c("Lee - Límite inferior", "Lee - Límite superior"),
+  Valor = round(c(df_lee$lower_lim - mean_control,
+                  df_lee$upper_lim - mean_control), 2))
 
-lee_tbl
+# ====/// 6: Poder estadistico  \\\=====
 
-# Poder estadístico
-tau_hat <- tau_hat_neyman
-sigma_pooled <- sqrt(
-  ((length(y1) - 1) * var(y1) + (length(y0) - 1) * var(y0)) /
-    (length(y1) + length(y0) - 2)
-)
-delta <- tau_hat / sigma_pooled
-
-tau_hat; sigma_pooled; delta
-
-power_diffmeans <- function(n, delta, alpha = 0.07, p = 0.5) {
+power_calc <- function(n, delta, alpha, p) {
   zcrit <- qnorm(1 - alpha / 2)
-  delta_n <- delta / sqrt(1 / (p * n) + 1 / ((1 - p) * n))
-  1 - (pnorm(zcrit - delta_n) - pnorm(-zcrit - delta_n))
+  pnorm(delta*sqrt(n*p*(1-p)) - zcrit)
 }
 
+delta_ney <- (tau_hat_neyman / sqrt(df_agg$Var[df_agg$treat==0]))
 alpha <- 0.07
-p_treat <- 0.5
 target_power <- 0.83
+p_treat <- 0.5
 
 psi <- tibble(
-  n = 20:5000,
-  power = power_diffmeans(20:5000, delta = delta, alpha = alpha, p = p_treat)
+  n = 20:200,
+  power = power_calc(20:200, delta = delta_ney, alpha = alpha, p = p_treat)
 )
 
-psi
+ggplot(psi, aes(x = n, y = power)) +
+  geom_line() +
+  geom_hline(yintercept = target_power, linetype = "dashed") +
+  labs(
+    x = "Tamaño muestral total (n)",
+    y = "Poder estadístico ψ(n)",
+    title = paste0("Curva de poder: α = ", alpha,
+                   ", delta = ", round(delta_ney, 3),
+                   ", p = ", p_treat)
+  ) +
+  theme_minimal()
 
-n_star <- psi %>% filter(power >= target_power) %>% slice(1) %>% pull(n)
-n_star
+ggsave("Graf_p6.png",  width = 5.54, height = 4.95)
 
-plot(
-  psi$n, psi$power, type = "l",
-  xlab = "Tamaño muestral total (n)",
-  ylab = "Poder estadístico ψ(n)",
-  main = paste0("Curva de poder: α = ", alpha, ", delta = ", round(delta, 3), ", p = ", p_treat)
-)
-abline(h = target_power, lty = 2)
-abline(v = n_star, lty = 2)
-text(n_star, target_power, labels = paste0(" n* ≈ ", n_star, "\n power = ", target_power), pos = 4)
-
-psi %>% filter(n %in% (n_star - 5):(n_star + 5))
+(n_star <- psi %>% filter(power >= target_power) %>% slice(1) %>% pull(n))
